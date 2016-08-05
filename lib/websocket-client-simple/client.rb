@@ -1,3 +1,5 @@
+require 'openssl/nonblock'
+
 module WebSocket
   module Client
     module Simple
@@ -44,38 +46,52 @@ module WebSocket
             emit :close, err
           end
 
-          @thread = Thread.new do
-            while !@closed do
+          @socket.write @handshake.to_s
+          while !@handshaked
+            read_sockets, _, _ = IO.select([@socket], [], [], 10)
+
+            if read_sockets[0]
               begin
-                unless recv_data = @socket.getc
-                  sleep 1
-                  next
-                end
-                unless @handshaked
+                while !@handshaked && recv_data = @socket.read_nonblock(1024)
                   @handshake << recv_data
+
                   if @handshake.finished?
                     @handshaked = true
-                    emit :open
-                  end
-                else
-                  frame << recv_data
-                  while msg = frame.next
-                    emit :message, msg
                   end
                 end
-              rescue => e
-                emit :error, e
+              rescue IO::WaitReadable
               end
             end
           end
 
-          @socket.write @handshake.to_s
+          @thread = Thread.new do
+            emit :open
+
+            while !@closed do
+              read_sockets, _, _ = IO.select([@socket], [], [], 10)
+
+              if read_sockets[0]
+                begin
+                  frame << @socket.read_nonblock(1024)
+
+                  while msg = frame.next
+                    emit :message, msg
+                  end
+                rescue IO::WaitReadable
+                  # Nothing
+                rescue => e
+                  emit :error, e
+                end
+              end
+            end
+          end
         end
 
         def send(data, opt={:type => :text})
           return if !@handshaked or @closed
           type = opt[:type]
           frame = ::WebSocket::Frame::Outgoing::Client.new(:data => data, :type => type, :version => @handshake.version)
+
           begin
             @socket.write frame.to_s
           rescue Errno::EPIPE => e
@@ -99,9 +115,7 @@ module WebSocket
         def open?
           @handshake.finished? and !@closed
         end
-
       end
-
     end
   end
 end

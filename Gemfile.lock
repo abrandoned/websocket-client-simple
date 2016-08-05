@@ -3,6 +3,7 @@ PATH
   specs:
     websocket-client-simple (0.3.0)
       event_emitter
+      openssl-nonblock
       websocket
 
 GEM
@@ -11,6 +12,7 @@ GEM
     event_emitter (0.2.5)
     eventmachine (1.0.9.1)
     minitest (5.8.4)
+    openssl-nonblock (0.2.1)
     rake (10.5.0)
     websocket (1.2.2)
     websocket-eventmachine-base (1.2.0)
@@ -33,4 +35,4 @@ DEPENDENCIES
   websocket-eventmachine-server
 
 BUNDLED WITH
-   1.11.2
+   1.12.5
