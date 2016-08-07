@@ -1,3 +1,5 @@
+require 'thread'
+
 module WebSocket
   module Client
     module Simple
@@ -11,7 +13,13 @@ module WebSocket
 
       class Client
         include EventEmitter
-        attr_reader :url, :handshake
+        attr_reader :url, :handshake, :message_queue
+
+        MS_2 = (1/500.0)
+
+        def initialize
+          @message_queue = ::Queue.new
+        end
 
         def connect(url, options={})
           return if @socket
@@ -45,26 +53,31 @@ module WebSocket
           end
 
           handshake
-          @thread = poll
         end
 
         def send_data(data, opt={:type => :text})
           return if !@handshaked || @closed
+          @thread ||= poll # utilize the polling interface, could probably be split into another class
 
-          frame = ::WebSocket::Frame::Outgoing::Client.new(:data => data, :type => opt[:type], :version => @handshake.version)
+          write_data(data, opt)
+        end
 
-          begin
-            @socket.write_nonblock(frame.to_s)
-          rescue IO::WaitReadable
-            IO.select([@socket]) # OpenSSL needs to read internally
-            retry
-          rescue IO::WaitWritable, Errno::EINTR
-            IO.select(nil, [@socket])
-            retry
-          rescue Errno::EPIPE => e
-            @pipe_broken = true
-            emit :__close, e
+        # Returns all responses that have been accepted
+        def send_data_and_wait(data, timeout, opt = { :type => :text })
+          return [] if !@handshaked || @closed
+
+          response_data = []
+          write_data(data, opt)
+          pull_next_message_off_of_socket(@socket, timeout)
+          pull_next_message_off_of_socket(@socket, MS_2) # 2ms penalty to check for additional messages
+
+          if message_queue.length > 0
+            message_queue.length.times do
+              response_data << message_queue.pop
+            end
           end
+
+          response_data
         end
 
         def close
@@ -78,6 +91,12 @@ module WebSocket
           @socket = nil
           Thread.kill @thread if @thread
         end
+
+        def open?
+          @handshake.finished? and !@closed
+        end
+
+      private
 
         def handshake
           @socket.write @handshake.to_s
@@ -96,7 +115,7 @@ module WebSocket
                 @handshaked = @handshake.finished?
               end
             rescue IO::WaitReadable
-              # No op
+              retry
             rescue IO::WaitWritable
               IO.select(nil, [socket])
               retry
@@ -106,39 +125,64 @@ module WebSocket
 
         def poll
           return Thread.new(@socket) do |socket|
-            frame = ::WebSocket::Frame::Incoming::Client.new
             emit :open
 
             while !@closed do
-              read_sockets, _, _ = IO.select([socket], nil, nil, 10)
+              pull_next_message_off_of_socket(socket)
 
-              if read_sockets && read_sockets[0]
-                begin
-                  frame << socket.read_nonblock(1024)
-
-                  if socket.respond_to?(:pending)
-                    frame << socket.read(socket.pending) while socket.pending > 0
-                  end
-
-                  if msg = frame.next
-                    emit :message, msg
-                    frame = ::WebSocket::Frame::Incoming::Client.new
-                  end
-                rescue IO::WaitReadable
-                  # Nothing
-                rescue IO::WaitWritable
-                  IO.select(nil, [socket])
-                  retry
-                rescue => e
-                  emit :error, e
-                end
+              message_queue.length.times do
+                emit :message, message_queue.pop
               end
             end
           end
         end
 
-        def open?
-          @handshake.finished? and !@closed
+        def pull_next_message_off_of_socket(socket, timeout = 10, last_frame = nil)
+          read_sockets, _, _ = IO.select([socket], nil, nil, timeout)
+
+          if read_sockets && read_sockets[0]
+            frame = last_frame || ::WebSocket::Frame::Incoming::Client.new
+
+            begin
+              frame << socket.read_nonblock(1024)
+
+              if socket.respond_to?(:pending)
+                frame << socket.read(socket.pending) while socket.pending > 0
+              end
+
+              if msg = frame.next
+                message_queue << msg
+                pull_next_message_off_of_socket(socket, MS_2) # 2ms penalty for new frames
+              else
+                pull_next_message_off_of_socket(socket, timeout, frame)
+              end
+            rescue IO::WaitReadable
+              IO.select([socket])
+              retry
+            rescue IO::WaitWritable
+              IO.select(nil, [socket])
+              retry
+            rescue => e
+              emit :error, e
+            end
+          end
+        end
+
+        def write_data(data, opt)
+          frame = ::WebSocket::Frame::Outgoing::Client.new(:data => data, :type => opt[:type], :version => @handshake.version)
+
+          begin
+            @socket.write_nonblock(frame.to_s)
+          rescue IO::WaitReadable
+            IO.select([@socket]) # OpenSSL needs to read internally
+            retry
+          rescue IO::WaitWritable, Errno::EINTR
+            IO.select(nil, [@socket])
+            retry
+          rescue Errno::EPIPE => e
+            @pipe_broken = true
+            emit :__close, e
+          end
         end
       end
     end
