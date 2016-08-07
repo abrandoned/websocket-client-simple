@@ -18,6 +18,7 @@ GEM
       method_source (~> 0.8.1)
       slop (~> 3.4)
     rake (10.5.0)
+    ruby-prof (0.15.9)
     slop (3.6.0)
     websocket (1.2.2)
     websocket-eventmachine-base (1.2.0)
@@ -37,6 +38,7 @@ DEPENDENCIES
   minitest
   pry
   rake
+  ruby-prof
   websocket-client-simple!
   websocket-eventmachine-server
 

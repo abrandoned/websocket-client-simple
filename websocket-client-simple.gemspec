@@ -22,6 +22,7 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency "minitest"
   spec.add_development_dependency "websocket-eventmachine-server"
   spec.add_development_dependency "eventmachine"
+  spec.add_development_dependency "ruby-prof"
   spec.add_development_dependency "pry"
 
   spec.add_dependency "websocket"
