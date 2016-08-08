@@ -13,22 +13,28 @@ module WebSocket
 
       class Client
         include EventEmitter
-        attr_reader :url, :handshake, :message_queue
+        attr_reader :url, :handshake, :message_queue, :connect_options
 
         MS_2 = (1/500.0)
+        FRAME_SIZE = 2048
 
         def initialize
           @message_queue = ::Queue.new
         end
 
-        def connect(url, options={})
-          return if @socket
-          @url = url
+        def connect(url = nil, options={})
+          return if open?
+
+          @connect_options = options
+          @connect_url = @url = url || @connect_url || @url
+
+          raise "No URL to connect to" if url.nil?
+
           uri = URI.parse url
-          @socket = TCPSocket.new(uri.host,
-                                  uri.port || (uri.scheme == 'wss' ? 443 : 80))
+          @socket = TCPSocket.new(uri.host, uri.port || (uri.scheme == 'wss' ? 443 : 80))
           @socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-          if ['https', 'wss'].include? uri.scheme
+
+          if ['https', 'wss'].include?(uri.scheme)
             ssl_context = options[:ssl_context] || begin
               ctx = OpenSSL::SSL::SSLContext.new
               ctx.ssl_version = options[:ssl_version] || 'SSLv23'
@@ -43,29 +49,23 @@ module WebSocket
             @socket.connect
           end
 
-          @handshake = ::WebSocket::Handshake::Client.new :url => url, :headers => options[:headers]
-          @handshaked = false
           @pipe_broken = false
           @closed = false
-          once :__close do |err|
-            close
-            emit :close, err
-          end
 
           handshake
         end
 
-        def send_data(data, opt={:type => :text})
-          return if !@handshaked || @closed
-          @thread ||= poll # utilize the polling interface, could probably be split into another class
+        def reconnect
+          connect(nil)
+        end
 
+        def send_data(data, opt={:type => :text})
+          @thread ||= poll # utilize the polling interface, could probably be split into another class
           write_data(data, opt)
         end
 
         # Returns all responses that have been accepted
         def send_data_and_wait(data, timeout, opt = { :type => :text })
-          return [] if !@handshaked || @closed
-
           response_data = []
           write_data(data, opt)
           pull_next_message_off_of_socket(@socket, timeout)
@@ -84,7 +84,7 @@ module WebSocket
           return if @closed
 
           send_data nil, :type => :close if !@pipe_broken
-          emit :__close
+          emit :close
         ensure
           @closed = true
           @socket.close if @socket
@@ -92,13 +92,19 @@ module WebSocket
           Thread.kill @thread if @thread
         end
 
+        def closed?
+          !open?
+        end
+
         def open?
-          @handshake.finished? and !@closed
+          @handshake && @handshake.finished? && !@closed
         end
 
       private
 
         def handshake
+          @handshake = ::WebSocket::Handshake::Client.new :url => url, :headers => @connect_options[:headers]
+          @handshaked = false
           @socket.write @handshake.to_s
 
           while !@handshaked
@@ -106,7 +112,7 @@ module WebSocket
               read_sockets, _, _ = IO.select([@socket], nil, nil, 10)
 
               if read_sockets && read_sockets[0]
-                @handshake << @socket.read_nonblock(1024)
+                @handshake << @socket.read_nonblock(FRAME_SIZE)
 
                 if @socket.respond_to?(:pending) # SSLSocket
                   @handshake << @socket.read(@socket.pending) while @socket.pending > 0
@@ -121,12 +127,12 @@ module WebSocket
               retry
             end
           end
+
+          emit :open if @handshaked
         end
 
         def poll
           return Thread.new(@socket) do |socket|
-            emit :open
-
             while !@closed do
               pull_next_message_off_of_socket(socket)
 
@@ -144,7 +150,7 @@ module WebSocket
             frame = last_frame || ::WebSocket::Frame::Incoming::Client.new
 
             begin
-              frame << socket.read_nonblock(1024)
+              frame << socket.read_nonblock(FRAME_SIZE)
 
               if socket.respond_to?(:pending)
                 frame << socket.read(socket.pending) while socket.pending > 0
@@ -163,6 +169,7 @@ module WebSocket
               IO.select(nil, [socket])
               retry
             rescue => e
+              close
               emit :error, e
             end
           end
@@ -181,7 +188,10 @@ module WebSocket
             retry
           rescue Errno::EPIPE => e
             @pipe_broken = true
-            emit :__close, e
+            close
+          rescue => e
+            close
+            emit :error, e
           end
         end
       end
